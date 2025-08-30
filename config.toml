@@ -1,0 +1,23 @@
+[kafka]
+brokers = ["kafka:9092"]
+group_id = "review-vectorizer"
+
+[postgres]
+# dsn = import from environment variables PG_DSN
+
+[processing]
+batch_size = 100
+timeout_seconds = "30s"
+
+[vectorizer]
+model = "text-embedding-3-small"
+batch_size = 50
+timeout_seconds = "60s"
+max_vector_length = 1536
+
+[openai]
+base_url = "https://api.openai.com/v1"
+model = "text-embedding-3-small"
+max_retries = 3
+timeout_seconds = "30s"
+# api_key = import from environment variables OPENAI_API_KEY
