@@ -14,10 +14,10 @@ The Review Vectorizer takes app reviews from the database and converts them into
 ## Architecture
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Kafka Topic   │───▶│  Review Vectorizer │───▶│  PostgreSQL +   │
-│ VectorizeRequest│    │                  │    │   pgvector      │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+┌──────────────────┐    ┌────────────────────┐    ┌────────────────┐
+│   Kafka Topic    │───▶│  Review Vectorizer │───▶│  PostgreSQL +  │
+│ VectorizeRequest │    │                    │    │   pgvector     │
+└──────────────────┘    └────────────────────┘    └────────────────┘
 ```
 
 - **Input**: Kafka messages requesting review vectorization
