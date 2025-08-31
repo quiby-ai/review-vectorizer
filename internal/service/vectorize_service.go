@@ -323,7 +323,7 @@ func (s *VectorizeService) Handle(ctx context.Context, payload any, sagaID strin
 		"failed", result.Failed,
 		"saga_id", sagaID)
 
-	if err := s.publishCompletedEvent(ctx, payload, sagaID, result); err != nil {
+	if err = s.publishCompletedEvent(ctx, payload, sagaID); err != nil {
 		s.logger.Error("Failed to publish completed event", "error", err, "saga_id", sagaID)
 	}
 
@@ -380,7 +380,7 @@ func (s *VectorizeService) extractRequestFromPayload(payload any) VectorizeReque
 	return req
 }
 
-func (s *VectorizeService) publishCompletedEvent(ctx context.Context, payload any, sagaID string, result VectorizeResult) error {
+func (s *VectorizeService) publishCompletedEvent(ctx context.Context, payload any, sagaID string) error {
 	evt := payload.(events.VectorizeRequest)
 
 	completedEvent := events.VectorizeCompleted{
@@ -388,19 +388,5 @@ func (s *VectorizeService) publishCompletedEvent(ctx context.Context, payload an
 	}
 
 	envelope := s.producer.BuildEnvelope(completedEvent, sagaID)
-
-	key := []byte(sagaID)
-	if err := s.producer.PublishEvent(ctx, key, envelope); err != nil {
-		return fmt.Errorf("failed to publish completed event: %w", err)
-	}
-
-	s.logger.Info("Published vectorization completed event",
-		"app_id", evt.AppID,
-		"app_name", evt.AppName,
-		"saga_id", sagaID,
-		"processed", result.Processed,
-		"skipped", result.Skipped,
-		"failed", result.Failed)
-
-	return nil
+	return s.producer.PublishEvent(ctx, []byte(sagaID), envelope)
 }
