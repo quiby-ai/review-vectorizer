@@ -6,7 +6,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/pgvector/pgvector-go v0.3.0
-	github.com/quiby-ai/common v0.0.0-20250827173011-39fb6a2c5567
+	github.com/quiby-ai/common v0.0.2
 	github.com/spf13/viper v1.18.2
 )
 
