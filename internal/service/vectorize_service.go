@@ -6,13 +6,20 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/quiby-ai/common/pkg/events"
 	"github.com/quiby-ai/review-vectorizer/config"
+	"github.com/quiby-ai/review-vectorizer/internal/producer"
 	"github.com/quiby-ai/review-vectorizer/internal/storage"
 )
 
 type VectorizeRequest struct {
 	ForceRecompute bool
 	Limit          int
+	AppID          string
+	Countries      []string
+	Languages      []string
+	DateFrom       string
+	DateTo         string
 }
 
 type VectorizeResult struct {
@@ -27,9 +34,10 @@ type VectorizeService struct {
 	embedder Embedder
 	cfg      *config.Config
 	logger   *slog.Logger
+	producer *producer.Producer
 }
 
-func NewVectorizeService(repo storage.Repository, cfg *config.Config, logger *slog.Logger) *VectorizeService {
+func NewVectorizeService(repo storage.Repository, cfg *config.Config, logger *slog.Logger, producer *producer.Producer) *VectorizeService {
 	var embedder Embedder
 
 	if cfg.OpenAI.APIKey != "" {
@@ -56,6 +64,7 @@ func NewVectorizeService(repo storage.Repository, cfg *config.Config, logger *sl
 		embedder: embedder,
 		cfg:      cfg,
 		logger:   logger,
+		producer: producer,
 	}
 }
 
@@ -70,19 +79,10 @@ func (s *VectorizeService) RunOnce(ctx context.Context, req VectorizeRequest) (V
 		"model", s.cfg.Vectorizer.Model,
 		"dim", s.cfg.Vectorizer.MaxVectorLength)
 
-	reviews, err := s.repo.GetCleanReviewsForVectorization(ctx, req.ForceRecompute, batchSize)
+	result, err := s.processAllReviews(ctx, req, batchSize)
 	if err != nil {
-		return VectorizeResult{}, fmt.Errorf("failed to fetch reviews: %w", err)
+		return VectorizeResult{}, fmt.Errorf("failed to process reviews: %w", err)
 	}
-
-	if len(reviews) == 0 {
-		s.logger.Info("No reviews found for vectorization")
-		return VectorizeResult{}, nil
-	}
-
-	s.logger.Info("Found reviews for vectorization", "count", len(reviews))
-
-	result := s.processReviewsInBatches(ctx, reviews)
 
 	duration := time.Since(startTime)
 	s.logger.Info("Vectorization run completed",
@@ -99,6 +99,63 @@ func (s *VectorizeService) determineBatchSize(limit int) int {
 		return limit
 	}
 	return s.cfg.Vectorizer.BatchSize
+}
+
+func (s *VectorizeService) processAllReviews(ctx context.Context, req VectorizeRequest, batchSize int) (VectorizeResult, error) {
+	result := VectorizeResult{}
+	offset := 0
+	totalProcessed := 0
+
+	filters := storage.CleanReviewFilters{
+		ForceRecompute: req.ForceRecompute,
+		AppID:          req.AppID,
+		Countries:      req.Countries,
+		Languages:      req.Languages,
+		DateFrom:       req.DateFrom,
+		DateTo:         req.DateTo,
+	}
+
+	for {
+		reviews, err := s.repo.GetCleanReviewsForVectorization(ctx, filters, batchSize, offset)
+		if err != nil {
+			return result, fmt.Errorf("failed to fetch reviews batch at offset %d: %w", offset, err)
+		}
+
+		if len(reviews) == 0 {
+			s.logger.Info("No more reviews to process", "total_processed", totalProcessed)
+			break
+		}
+
+		s.logger.Info("Processing batch of reviews",
+			"batch_size", len(reviews),
+			"offset", offset,
+			"total_processed", totalProcessed)
+
+		batchResult := s.processReviewsInBatches(ctx, reviews)
+
+		result.Processed += batchResult.Processed
+		result.Skipped += batchResult.Skipped
+		result.Failed += batchResult.Failed
+		result.ReviewIDs = append(result.ReviewIDs, batchResult.ReviewIDs...)
+
+		totalProcessed += len(reviews)
+
+		if len(reviews) < batchSize {
+			s.logger.Info("Reached end of reviews", "total_processed", totalProcessed)
+			break
+		}
+
+		offset += batchSize
+
+		select {
+		case <-ctx.Done():
+			s.logger.Info("Context cancelled, stopping review processing", "total_processed", totalProcessed)
+			return result, ctx.Err()
+		default:
+		}
+	}
+
+	return result, nil
 }
 
 func (s *VectorizeService) processReviewsInBatches(ctx context.Context, reviews []storage.CleanReview) VectorizeResult {
@@ -247,6 +304,11 @@ func (s *VectorizeService) Handle(ctx context.Context, payload any, sagaID strin
 	s.logger.Info("Vectorization request",
 		"force_recompute", req.ForceRecompute,
 		"limit", req.Limit,
+		"app_id", req.AppID,
+		"countries", req.Countries,
+		"languages", req.Languages,
+		"date_from", req.DateFrom,
+		"date_to", req.DateTo,
 		"saga_id", sagaID)
 
 	result, err := s.RunOnce(ctx, req)
@@ -260,6 +322,10 @@ func (s *VectorizeService) Handle(ctx context.Context, payload any, sagaID strin
 		"skipped", result.Skipped,
 		"failed", result.Failed,
 		"saga_id", sagaID)
+
+	if err := s.publishCompletedEvent(ctx, payload, sagaID, result); err != nil {
+		s.logger.Error("Failed to publish completed event", "error", err, "saga_id", sagaID)
+	}
 
 	return nil
 }
@@ -278,6 +344,31 @@ func (s *VectorizeService) extractRequestFromPayload(payload any) VectorizeReque
 		if batchSize, ok := p["batch_size"].(float64); ok {
 			req.Limit = int(batchSize)
 		}
+		if appID, ok := p["app_id"].(string); ok {
+			req.AppID = appID
+		}
+		if countries, ok := p["countries"].([]any); ok {
+			req.Countries = make([]string, len(countries))
+			for i, country := range countries {
+				if countryStr, ok := country.(string); ok {
+					req.Countries[i] = countryStr
+				}
+			}
+		}
+		if languages, ok := p["languages"].([]any); ok {
+			req.Languages = make([]string, len(languages))
+			for i, language := range languages {
+				if languageStr, ok := language.(string); ok {
+					req.Languages[i] = languageStr
+				}
+			}
+		}
+		if dateFrom, ok := p["date_from"].(string); ok {
+			req.DateFrom = dateFrom
+		}
+		if dateTo, ok := p["date_to"].(string); ok {
+			req.DateTo = dateTo
+		}
 	case string:
 		if p == "force" || p == "recompute" {
 			req.ForceRecompute = true
@@ -287,4 +378,29 @@ func (s *VectorizeService) extractRequestFromPayload(payload any) VectorizeReque
 	}
 
 	return req
+}
+
+func (s *VectorizeService) publishCompletedEvent(ctx context.Context, payload any, sagaID string, result VectorizeResult) error {
+	evt := payload.(events.VectorizeRequest)
+
+	completedEvent := events.VectorizeCompleted{
+		VectorizeRequest: evt,
+	}
+
+	envelope := s.producer.BuildEnvelope(completedEvent, sagaID)
+
+	key := []byte(sagaID)
+	if err := s.producer.PublishEvent(ctx, key, envelope); err != nil {
+		return fmt.Errorf("failed to publish completed event: %w", err)
+	}
+
+	s.logger.Info("Published vectorization completed event",
+		"app_id", evt.AppID,
+		"app_name", evt.AppName,
+		"saga_id", sagaID,
+		"processed", result.Processed,
+		"skipped", result.Skipped,
+		"failed", result.Failed)
+
+	return nil
 }

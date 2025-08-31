@@ -9,6 +9,7 @@ import (
 
 	"github.com/quiby-ai/review-vectorizer/config"
 	"github.com/quiby-ai/review-vectorizer/internal/consumer"
+	"github.com/quiby-ai/review-vectorizer/internal/producer"
 	"github.com/quiby-ai/review-vectorizer/internal/service"
 	"github.com/quiby-ai/review-vectorizer/internal/storage"
 )
@@ -44,7 +45,10 @@ func main() {
 		logger.Info("Table statistics", "stats", stats)
 	}
 
-	svc := service.NewVectorizeService(repo, cfg, logger)
+	producer := producer.NewProducer(cfg.Kafka)
+	defer producer.Close()
+
+	svc := service.NewVectorizeService(repo, cfg, logger, producer)
 
 	cons := consumer.NewKafkaConsumer(cfg.Kafka, svc)
 	if err := cons.Run(ctx); err != nil {

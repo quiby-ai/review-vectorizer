@@ -8,8 +8,17 @@ import (
 	"github.com/pgvector/pgvector-go"
 )
 
+type CleanReviewFilters struct {
+	ForceRecompute bool
+	AppID          string
+	Countries      []string
+	Languages      []string
+	DateFrom       string
+	DateTo         string
+}
+
 type Repository interface {
-	GetCleanReviewsForVectorization(ctx context.Context, forceRecompute bool, limit int) ([]CleanReview, error)
+	GetCleanReviewsForVectorization(ctx context.Context, filters CleanReviewFilters, limit int, offset int) ([]CleanReview, error)
 	UpsertEmbedding(ctx context.Context, vector *Vector) error
 	GetTableStats(ctx context.Context) (map[string]any, error)
 	Close() error
@@ -116,21 +125,74 @@ func (r *postgresRepository) GetTableStats(ctx context.Context) (map[string]any,
 	return stats, nil
 }
 
-func (r *postgresRepository) GetCleanReviewsForVectorization(ctx context.Context, forceRecompute bool, limit int) ([]CleanReview, error) {
-	query := `
+func (r *postgresRepository) GetCleanReviewsForVectorization(ctx context.Context, filters CleanReviewFilters, limit int, offset int) ([]CleanReview, error) {
+	whereClause := "WHERE cr.is_contentful = true AND cr.content_clean IS NOT NULL"
+	args := []any{}
+	argIndex := 1
+
+	if filters.ForceRecompute {
+		whereClause += " AND (re.review_id IS NULL OR $1::bool = true)"
+		args = append(args, true)
+		argIndex++
+	} else {
+		whereClause += " AND re.review_id IS NULL"
+	}
+
+	if filters.AppID != "" {
+		whereClause += fmt.Sprintf(" AND cr.app_id = $%d", argIndex)
+		args = append(args, filters.AppID)
+		argIndex++
+	}
+
+	if len(filters.Countries) > 0 {
+		placeholders := make([]string, len(filters.Countries))
+		for i := range filters.Countries {
+			placeholders[i] = fmt.Sprintf("$%d", argIndex)
+			args = append(args, filters.Countries[i])
+			argIndex++
+		}
+		whereClause += fmt.Sprintf(" AND cr.country = ANY($%d)", argIndex)
+		args = append(args, filters.Countries)
+		argIndex++
+	}
+
+	if len(filters.Languages) > 0 {
+		placeholders := make([]string, len(filters.Languages))
+		for i := range filters.Languages {
+			placeholders[i] = fmt.Sprintf("$%d", argIndex)
+			args = append(args, filters.Languages[i])
+			argIndex++
+		}
+		whereClause += fmt.Sprintf(" AND cr.language = ANY($%d)", argIndex)
+		args = append(args, filters.Languages)
+		argIndex++
+	}
+
+	if filters.DateFrom != "" {
+		whereClause += fmt.Sprintf(" AND cr.reviewed_at >= $%d", argIndex)
+		args = append(args, filters.DateFrom)
+		argIndex++
+	}
+	if filters.DateTo != "" {
+		whereClause += fmt.Sprintf(" AND cr.reviewed_at <= $%d", argIndex)
+		args = append(args, filters.DateTo)
+		argIndex++
+	}
+
+	args = append(args, limit, offset)
+
+	query := fmt.Sprintf(`
 		SELECT
 			cr.id, cr.app_id, cr.country, cr.rating, cr.language,
 			cr.content_clean, cr.content_en, cr.response_content_clean
 		FROM clean_reviews cr
 		LEFT JOIN review_embeddings re ON re.review_id = cr.id
-		WHERE cr.is_contentful = true
-			AND cr.content_clean IS NOT NULL
-			AND (re.review_id IS NULL OR $1::bool = true)
+		%s
 		ORDER BY cr.reviewed_at DESC
-		LIMIT $2;
-	`
+		LIMIT $%d OFFSET $%d;
+	`, whereClause, argIndex, argIndex+1)
 
-	rows, err := r.db.Query(ctx, query, forceRecompute, limit)
+	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query clean reviews: %w", err)
 	}
